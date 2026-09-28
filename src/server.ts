@@ -1,5 +1,4 @@
 import 'dotenv/config';
-
 import crypto from 'node:crypto';
 import http from 'node:http';
 import express from 'express';
@@ -8,34 +7,27 @@ import {
   WebSocket,
   WebSocketServer,
 } from 'ws';
-
 import { config } from './config.js';
-
 import {
   rooms,
   type Client,
 } from './room.js';
-
 import {
   crowd,
 } from './crowd.js';
-
 import type {
   AudienceEvent,
   CommandTarget,
   LightAction,
   LightCommand,
 } from './types.js';
-
 /**
  * ---------------------------------------------------------
  * APP
  * ---------------------------------------------------------
  */
-
 const app =
   express();
-
 app.use(
   cors({
     origin(
@@ -50,10 +42,8 @@ app.use(
           null,
           true,
         );
-
         return;
       }
-
       if (
         config.allowedOrigins.includes(
           origin,
@@ -63,10 +53,8 @@ app.use(
           null,
           true,
         );
-
         return;
       }
-
       callback(
         new Error(
           'Origin not allowed',
@@ -75,55 +63,44 @@ app.use(
     },
   }),
 );
-
 app.use(
   express.json({
     limit: '4kb',
   }),
 );
-
 /**
  * ---------------------------------------------------------
  * HTTP SERVER
  * ---------------------------------------------------------
  */
-
 const server =
   http.createServer(
     app,
   );
-
 /**
  * ---------------------------------------------------------
  * WEBSOCKET SERVER
  * ---------------------------------------------------------
  */
-
 const wss =
   new WebSocketServer({
     noServer: true,
-
     perMessageDeflate:
       false,
-
     maxPayload: 4096,
   });
-
 /**
  * ---------------------------------------------------------
  * COMMAND SEQUENCE
  * ---------------------------------------------------------
  */
-
 let commandSequence =
   0;
-
 /**
  * ---------------------------------------------------------
  * HELPERS
  * ---------------------------------------------------------
  */
-
 function normalizeZone(
   value: unknown,
 ): string | null {
@@ -133,22 +110,18 @@ function normalizeZone(
   ) {
     return null;
   }
-
   const zone =
     value.trim();
-
   if (
     zone.length === 0
   ) {
     return 'main';
   }
-
   if (
     zone === 'all'
   ) {
     return 'all';
   }
-
   if (
     !/^[a-zA-Z0-9_-]{1,32}$/.test(
       zone,
@@ -156,10 +129,8 @@ function normalizeZone(
   ) {
     return null;
   }
-
   return zone;
 }
-
 function normalizeRow(
   value: unknown,
 ): string | undefined {
@@ -171,17 +142,14 @@ function normalizeRow(
   ) {
     return undefined;
   }
-
   if (
     typeof value !==
     'string'
   ) {
     return undefined;
   }
-
   const row =
     value.trim();
-
   if (
     !/^[a-zA-Z0-9_-]{1,32}$/.test(
       row,
@@ -189,10 +157,8 @@ function normalizeRow(
   ) {
     return undefined;
   }
-
   return row;
 }
-
 function isValidColor(
   value: unknown,
 ): value is string {
@@ -204,7 +170,6 @@ function isValidColor(
     )
   );
 }
-
 function isValidAction(
   value: unknown,
 ): value is LightAction {
@@ -214,7 +179,6 @@ function isValidAction(
     value === 'off'
   );
 }
-
 function isValidDuration(
   value: unknown,
 ): value is number {
@@ -226,7 +190,6 @@ function isValidDuration(
     value <= 10_000
   );
 }
-
 /**
  * Constant-time admin token comparison.
  */
@@ -238,26 +201,22 @@ function isValidAdminToken(
       config.adminToken,
       'utf8',
     );
-
   const supplied =
     Buffer.from(
       token,
       'utf8',
     );
-
   if (
     expected.length !==
     supplied.length
   ) {
     return false;
   }
-
   return crypto.timingSafeEqual(
     expected,
     supplied,
   );
 }
-
 function requireAdmin(
   req: express.Request,
   res: express.Response,
@@ -265,7 +224,6 @@ function requireAdmin(
 ): void {
   const header =
     req.headers.authorization;
-
   if (
     !header ||
     !header.startsWith(
@@ -278,13 +236,10 @@ function requireAdmin(
         error:
           'Unauthorized',
       });
-
     return;
   }
-
   const token =
     header.slice(7);
-
   if (
     !isValidAdminToken(
       token,
@@ -296,13 +251,10 @@ function requireAdmin(
         error:
           'Unauthorized',
       });
-
     return;
   }
-
   next();
 }
-
 /**
  * ---------------------------------------------------------
  * AUDIENCE RATE LIMITER
@@ -322,13 +274,10 @@ function requireAdmin(
  *
  * It is NOT a one-vote-per-user system.
  */
-
 class AudienceRateLimiter {
   private tokens: number;
-
   private lastRefill =
     Date.now();
-
   constructor(
     private readonly ratePerSecond: number,
     private readonly burst: number,
@@ -336,17 +285,14 @@ class AudienceRateLimiter {
     this.tokens =
       burst;
   }
-
   consume(): boolean {
     const now =
       Date.now();
-
     const elapsed =
       (
         now -
         this.lastRefill
       ) / 1000;
-
     if (
       elapsed > 0
     ) {
@@ -357,31 +303,25 @@ class AudienceRateLimiter {
             elapsed *
               this.ratePerSecond,
         );
-
       this.lastRefill =
         now;
     }
-
     if (
       this.tokens <
       1
     ) {
       return false;
     }
-
     this.tokens -=
       1;
-
     return true;
   }
 }
-
 /**
  ----------------------------------------------------------
  * HEALTH
  ----------------------------------------------------------
  */
-
 app.get(
   '/health',
   (_req, res) => {
@@ -390,13 +330,11 @@ app.get(
     });
   },
 );
-
 /**
  * ---------------------------------------------------------
  * SERVER TIME
  * ---------------------------------------------------------
  */
-
 app.get(
   '/time',
   (_req, res) => {
@@ -406,32 +344,26 @@ app.get(
     });
   },
 );
-
 /**
  * ---------------------------------------------------------
  * ADMIN STATS
  * ---------------------------------------------------------
  */
-
 app.get(
   '/admin/stats',
   requireAdmin,
   (_req, res) => {
     res.json({
       status: 'ok',
-
       serverTime:
         Date.now(),
-
       rooms:
         rooms.getStats(),
-
       crowd:
         crowd.getStats(),
     });
   },
 );
-
 /**
  * ---------------------------------------------------------
  * ADMIN CROWD STATS
@@ -441,23 +373,19 @@ app.get(
  * dashboard does not need to know anything about audience
  * WebSocket connections.
  */
-
 app.get(
   '/admin/crowd',
   requireAdmin,
   (_req, res) => {
     res.json({
       status: 'ok',
-
       serverTime:
         Date.now(),
-
       crowd:
         crowd.getStats(),
     });
   },
 );
-
 /**
  * ---------------------------------------------------------
  * RESET CROWD INTERACTION
@@ -473,28 +401,23 @@ app.get(
  * → calculate energy
  * → trigger pattern
  */
-
 app.post(
   '/admin/crowd/reset',
   requireAdmin,
   (_req, res) => {
     crowd.reset();
-
     res.json({
       success: true,
-
       crowd:
         crowd.getStats(),
     });
   },
 );
-
 /**
  * ---------------------------------------------------------
  * ADMIN LIGHT COMMAND
  * ---------------------------------------------------------
  */
-
 app.post(
   '/admin/command',
   requireAdmin,
@@ -507,7 +430,6 @@ app.post(
         color?: unknown;
         duration?: unknown;
       };
-
     /**
      * Zone
      */
@@ -515,7 +437,6 @@ app.post(
       normalizeZone(
         body.zone,
       );
-
     if (!zone) {
       res
         .status(400)
@@ -523,10 +444,8 @@ app.post(
           error:
             'Invalid zone',
         });
-
       return;
     }
-
     /**
      * Row
      */
@@ -534,7 +453,6 @@ app.post(
       normalizeRow(
         body.row,
       );
-
     if (
       body.row !==
         undefined &&
@@ -550,10 +468,8 @@ app.post(
           error:
             'Invalid row',
         });
-
       return;
     }
-
     /**
      * Action
      */
@@ -568,10 +484,8 @@ app.post(
           error:
             'Invalid action',
         });
-
       return;
     }
-
     /**
      * Color
      */
@@ -586,10 +500,8 @@ app.post(
           error:
             'Color must be #RRGGBB',
         });
-
       return;
     }
-
     /**
      * Duration
      */
@@ -604,64 +516,48 @@ app.post(
           error:
             'Duration must be between 0 and 10000ms',
         });
-
       return;
     }
-
     const target: CommandTarget =
       {
         zone,
-
         ...(row
           ? { row }
           : {}),
       };
-
     const command:
       LightCommand =
       {
         type: 'command',
-
         action:
           body.action,
-
         color:
           body.color.toUpperCase(),
-
         duration:
           body.duration,
-
         timestamp:
           Date.now(),
-
         sequence:
           ++commandSequence,
       };
-
     const recipients =
       rooms.broadcast(
         target,
         command,
       );
-
     res.json({
       success: true,
-
       recipients,
-
       target,
-
       command,
     });
   },
 );
-
 /**
  * ---------------------------------------------------------
  * WEBSOCKET UPGRADE
  * ---------------------------------------------------------
  */
-
 server.on(
   'upgrade',
   (
@@ -672,7 +568,6 @@ server.on(
     try {
       const origin =
         request.headers.origin;
-
       /**
        * Browser clients send Origin.
        *
@@ -687,19 +582,15 @@ server.on(
         socket.write(
           'HTTP/1.1 403 Forbidden\r\n\r\n',
         );
-
         socket.destroy();
-
         return;
       }
-
       const url =
         new URL(
           request.url ??
             '/',
           `http://${request.headers.host}`,
         );
-
       if (
         url.pathname !==
         '/ws'
@@ -707,12 +598,9 @@ server.on(
         socket.write(
           'HTTP/1.1 404 Not Found\r\n\r\n',
         );
-
         socket.destroy();
-
         return;
       }
-
       /**
        * Audience room.
        *
@@ -727,7 +615,6 @@ server.on(
             'zone',
           ) ?? 'main',
         );
-
       if (
         !zone ||
         zone === 'all'
@@ -735,19 +622,15 @@ server.on(
         socket.write(
           'HTTP/1.1 400 Bad Request\r\n\r\n',
         );
-
         socket.destroy();
-
         return;
       }
-
       const row =
         normalizeRow(
           url.searchParams.get(
             'row',
           ),
         );
-
       wss.handleUpgrade(
         request,
         socket,
@@ -769,13 +652,11 @@ server.on(
     }
   },
 );
-
 /**
  * ---------------------------------------------------------
  * WEBSOCKET CONNECTION
  * ---------------------------------------------------------
  */
-
 wss.on(
   'connection',
   (
@@ -789,16 +670,12 @@ wss.on(
     const client: Client =
       {
         socket,
-
         zone:
           context.zone,
-
         row:
           context.row,
-
         alive: true,
       };
-
     /**
      * Per-connection audience tap limiter.
      */
@@ -807,46 +684,37 @@ wss.on(
         config
           .audienceRateLimit
           .ratePerSecond,
-
         config
           .audienceRateLimit
           .burst,
       );
-
     rooms.join(
       client,
     );
-
     crowd.connectionOpened();
-
     /**
      * Initial connection acknowledgement.
      */
     socket.send(
       JSON.stringify({
         type: 'joined',
-
         zone:
           client.zone,
-
         ...(client.row
           ? {
               row:
                 client.row,
             }
           : {}),
-
         serverTime:
           Date.now(),
       }),
     );
-
     /**
      * -------------------------------------------------------
      * MESSAGE HANDLER
      * -------------------------------------------------------
      */
-
 socket.on(
   'message',
   data => {
@@ -867,7 +735,6 @@ socket.on(
             : Buffer.from(
                 new Uint8Array(data),
               );
-
       /**
        * Protect the JSON parser from
        * unexpectedly large payloads.
@@ -878,12 +745,10 @@ socket.on(
       ) {
         return;
       }
-
       const message =
         JSON.parse(
           payload.toString('utf8'),
         ) as unknown;
-
       if (
         !message ||
         typeof message !==
@@ -891,10 +756,8 @@ socket.on(
       ) {
         return;
       }
-
       const event =
         message as Partial<AudienceEvent>;
-
       /**
        * PING
        */
@@ -908,7 +771,6 @@ socket.on(
         ) {
           return;
         }
-
         socket.send(
           JSON.stringify({
             type: 'pong',
@@ -918,10 +780,8 @@ socket.on(
               Date.now(),
           }),
         );
-
         return;
       }
-
       /**
        * AUDIENCE TAP
        */
@@ -934,9 +794,7 @@ socket.on(
         ) {
           return;
         }
-
         crowd.recordTap();
-
         return;
       }
     } catch {
@@ -947,13 +805,11 @@ socket.on(
     }
   },
 );
-
     /**
      * -------------------------------------------------------
      * HEARTBEAT
      * -------------------------------------------------------
      */
-
     socket.on(
       'pong',
       () => {
@@ -961,24 +817,20 @@ socket.on(
           true;
       },
     );
-
     /**
      * -------------------------------------------------------
      * CLOSE
      * -------------------------------------------------------
      */
-
     socket.on(
       'close',
       () => {
         rooms.leave(
           client,
         );
-
         crowd.connectionClosed();
       },
     );
-
     socket.on(
       'error',
       () => {
@@ -989,13 +841,11 @@ socket.on(
     );
   },
 );
-
 /**
  * ---------------------------------------------------------
  * HEARTBEAT LOOP
  * ---------------------------------------------------------
  */
-
 const heartbeat =
   setInterval(
     () => {
@@ -1009,30 +859,23 @@ const heartbeat =
           rooms.leave(
             client,
           );
-
           crowd.connectionClosed();
-
           try {
             client.socket.terminate();
           } catch {
             // Ignore.
           }
-
           continue;
         }
-
         client.alive =
           false;
-
         try {
           client.socket.ping();
         } catch {
           rooms.leave(
             client,
           );
-
           crowd.connectionClosed();
-
           try {
             client.socket.terminate();
           } catch {
@@ -1043,24 +886,20 @@ const heartbeat =
     },
     30_000,
   );
-
 /**
  * ---------------------------------------------------------
  * GRACEFUL SHUTDOWN
  * ---------------------------------------------------------
  */
-
 function shutdown(
   signal: string,
 ): void {
   console.log(
     `[server] ${signal} received`,
   );
-
   clearInterval(
     heartbeat,
   );
-
   for (
     const client of rooms.getClients()
   ) {
@@ -1073,7 +912,6 @@ function shutdown(
       // Ignore.
     }
   }
-
   server.close(
     () => {
       process.exit(
@@ -1082,7 +920,6 @@ function shutdown(
     },
   );
 }
-
 process.on(
   'SIGTERM',
   () =>
@@ -1090,7 +927,6 @@ process.on(
       'SIGTERM',
     ),
 );
-
 process.on(
   'SIGINT',
   () =>
@@ -1098,13 +934,11 @@ process.on(
       'SIGINT',
     ),
 );
-
 /**
  * ---------------------------------------------------------
  * START
  * ---------------------------------------------------------
  */
-
 server.listen(
   config.port,
   '0.0.0.0',
@@ -1112,13 +946,11 @@ server.listen(
     console.log(
       `[server] listening on :${config.port}`,
     );
-
     console.log(
       `[server] allowed origins: ${config.allowedOrigins.join(
         ', ',
       )}`,
     );
-
     console.log(
       `[server] audience tap rate: ${config.audienceRateLimit.ratePerSecond}/sec`,
     );
