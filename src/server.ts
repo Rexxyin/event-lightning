@@ -1,86 +1,260 @@
-import express from "express";
-import cors from "cors";
-import { createServer } from "node:http";
-import { timingSafeEqual } from "node:crypto";
-import WebSocket, { WebSocketServer } from "ws";
+import 'dotenv/config';
 
-import { config } from "./config.js";
-import { RoomManager, type Client } from "./room.js";
+import crypto from 'node:crypto';
+import http from 'node:http';
+import express from 'express';
+import cors from 'cors';
+import {
+  WebSocket,
+  WebSocketServer,
+} from 'ws';
+
+import { config } from './config.js';
+
+import {
+  rooms,
+  type Client,
+} from './room.js';
+
+import {
+  crowd,
+} from './crowd.js';
+
 import type {
+  AudienceEvent,
   CommandTarget,
   LightAction,
   LightCommand,
-} from "./types.js";
+} from './types.js';
 
-const app = express();
-const rooms = new RoomManager();
-const server = createServer(app);
+/**
+ * ---------------------------------------------------------
+ * APP
+ * ---------------------------------------------------------
+ */
 
-let sequence = 0;
-
-app.disable("x-powered-by");
+const app =
+  express();
 
 app.use(
   cors({
-    origin: config.allowedOrigins,
+    origin(
+      origin,
+      callback,
+    ) {
+      /**
+       * Allow non-browser clients such as curl/wscat.
+       */
+      if (!origin) {
+        callback(
+          null,
+          true,
+        );
+
+        return;
+      }
+
+      if (
+        config.allowedOrigins.includes(
+          origin,
+        )
+      ) {
+        callback(
+          null,
+          true,
+        );
+
+        return;
+      }
+
+      callback(
+        new Error(
+          'Origin not allowed',
+        ),
+      );
+    },
   }),
 );
 
 app.use(
   express.json({
-    limit: "4kb",
+    limit: '4kb',
   }),
 );
 
-const wss = new WebSocketServer({
-  noServer: true,
-  perMessageDeflate: false,
-  maxPayload: 4096,
-});
+/**
+ * ---------------------------------------------------------
+ * HTTP SERVER
+ * ---------------------------------------------------------
+ */
 
-// --------------------------------------------------
-// Helpers
-// --------------------------------------------------
+const server =
+  http.createServer(
+    app,
+  );
 
-function isValidIdentifier(value: string): boolean {
-  return /^[a-zA-Z0-9_-]{1,32}$/.test(value);
-}
+/**
+ * ---------------------------------------------------------
+ * WEBSOCKET SERVER
+ * ---------------------------------------------------------
+ */
 
-function normalizeZone(value: string | null): string {
-  if (!value) {
-    return "main";
+const wss =
+  new WebSocketServer({
+    noServer: true,
+
+    perMessageDeflate:
+      false,
+
+    maxPayload: 4096,
+  });
+
+/**
+ * ---------------------------------------------------------
+ * COMMAND SEQUENCE
+ * ---------------------------------------------------------
+ */
+
+let commandSequence =
+  0;
+
+/**
+ * ---------------------------------------------------------
+ * HELPERS
+ * ---------------------------------------------------------
+ */
+
+function normalizeZone(
+  value: unknown,
+): string | null {
+  if (
+    typeof value !==
+    'string'
+  ) {
+    return null;
   }
 
-  if (!isValidIdentifier(value)) {
-    throw new Error("Invalid zone");
+  const zone =
+    value.trim();
+
+  if (
+    zone.length === 0
+  ) {
+    return 'main';
   }
 
-  return value;
+  if (
+    zone === 'all'
+  ) {
+    return 'all';
+  }
+
+  if (
+    !/^[a-zA-Z0-9_-]{1,32}$/.test(
+      zone,
+    )
+  ) {
+    return null;
+  }
+
+  return zone;
 }
 
-function normalizeRow(value: string | null): string | undefined {
-  if (!value) {
+function normalizeRow(
+  value: unknown,
+): string | undefined {
+  if (
+    value ===
+      undefined ||
+    value === null ||
+    value === ''
+  ) {
     return undefined;
   }
 
-  if (!isValidIdentifier(value)) {
-    throw new Error("Invalid row");
+  if (
+    typeof value !==
+    'string'
+  ) {
+    return undefined;
   }
 
-  return value;
+  const row =
+    value.trim();
+
+  if (
+    !/^[a-zA-Z0-9_-]{1,32}$/.test(
+      row,
+    )
+  ) {
+    return undefined;
+  }
+
+  return row;
 }
 
-function authorized(header?: string): boolean {
-  if (!header?.startsWith("Bearer ")) {
+function isValidColor(
+  value: unknown,
+): value is string {
+  return (
+    typeof value ===
+      'string' &&
+    /^#[0-9a-fA-F]{6}$/.test(
+      value,
+    )
+  );
+}
+
+function isValidAction(
+  value: unknown,
+): value is LightAction {
+  return (
+    value === 'solid' ||
+    value === 'flash' ||
+    value === 'off'
+  );
+}
+
+function isValidDuration(
+  value: unknown,
+): value is number {
+  return (
+    typeof value ===
+      'number' &&
+    Number.isFinite(value) &&
+    value >= 0 &&
+    value <= 10_000
+  );
+}
+
+/**
+ * Constant-time admin token comparison.
+ */
+function isValidAdminToken(
+  token: string,
+): boolean {
+  const expected =
+    Buffer.from(
+      config.adminToken,
+      'utf8',
+    );
+
+  const supplied =
+    Buffer.from(
+      token,
+      'utf8',
+    );
+
+  if (
+    expected.length !==
+    supplied.length
+  ) {
     return false;
   }
 
-  const provided = Buffer.from(header.slice(7));
-  const expected = Buffer.from(config.adminToken);
-
-  return (
-    provided.length === expected.length &&
-    timingSafeEqual(provided, expected)
+  return crypto.timingSafeEqual(
+    expected,
+    supplied,
   );
 }
 
@@ -88,283 +262,430 @@ function requireAdmin(
   req: express.Request,
   res: express.Response,
   next: express.NextFunction,
-) {
-  if (!authorized(req.headers.authorization)) {
-    return res.sendStatus(401);
+): void {
+  const header =
+    req.headers.authorization;
+
+  if (
+    !header ||
+    !header.startsWith(
+      'Bearer ',
+    )
+  ) {
+    res
+      .status(401)
+      .json({
+        error:
+          'Unauthorized',
+      });
+
+    return;
+  }
+
+  const token =
+    header.slice(7);
+
+  if (
+    !isValidAdminToken(
+      token,
+    )
+  ) {
+    res
+      .status(401)
+      .json({
+        error:
+          'Unauthorized',
+      });
+
+    return;
   }
 
   next();
 }
 
-// --------------------------------------------------
-// Public endpoints
-// --------------------------------------------------
-
 /**
- * Basic health check.
+ * ---------------------------------------------------------
+ * AUDIENCE RATE LIMITER
+ * ---------------------------------------------------------
  *
- * Does not expose audience information.
+ * Token bucket per WebSocket connection.
+ *
+ * This allows:
+ *
+ * - repeated taps
+ * - short bursts
+ *
+ * while preventing:
+ *
+ * - accidental event storms
+ * - one connection generating millions of events
+ *
+ * It is NOT a one-vote-per-user system.
  */
-app.get("/health", (_req, res) => {
-  res.json({
-    status: "ok",
-  });
-});
 
-/**
- * Public server clock.
- *
- * Used by clients for initial clock synchronization.
- */
-app.get("/time", (_req, res) => {
-  res.json({
-    serverTime: Date.now(),
-  });
-});
+class AudienceRateLimiter {
+  private tokens: number;
 
-// --------------------------------------------------
-// Admin endpoints
-// --------------------------------------------------
+  private lastRefill =
+    Date.now();
 
-/**
- * Dynamic audience statistics.
- *
- * Example response:
- *
- * {
- *   "total": 5,
- *   "zones": {
- *     "A": {
- *       "total": 3,
- *       "rows": {
- *         "1": 1,
- *         "2": 2
- *       }
- *     },
- *     "B": {
- *       "total": 2,
- *       "rows": {
- *         "1": 2
- *       }
- *     }
- *   }
- * }
- */
-app.get("/admin/stats", requireAdmin, (_req, res) => {
-  return res.json(rooms.getStats());
-});
-
-/**
- * Send a light command.
- *
- * Supported targets:
- *
- * Global:
- * {
- *   "zone": "all"
- * }
- *
- * Zone:
- * {
- *   "zone": "A"
- * }
- *
- * Zone + row:
- * {
- *   "zone": "A",
- *   "row": "12"
- * }
- */
-app.post("/admin/command", requireAdmin, (req, res) => {
-  const body = req.body as {
-    zone?: unknown;
-    row?: unknown;
-    action?: unknown;
-    color?: unknown;
-    duration?: unknown;
-  };
-
-  // ------------------------------------------------
-  // Validate zone
-  // ------------------------------------------------
-
-  const zone =
-    typeof body.zone === "string"
-      ? body.zone.trim()
-      : "all";
-
-  if (
-    zone !== "all" &&
-    !isValidIdentifier(zone)
+  constructor(
+    private readonly ratePerSecond: number,
+    private readonly burst: number,
   ) {
-    return res.status(400).json({
-      error: "Invalid zone",
-    });
+    this.tokens =
+      burst;
   }
 
-  // ------------------------------------------------
-  // Validate row
-  // ------------------------------------------------
+  consume(): boolean {
+    const now =
+      Date.now();
 
-  let row: string | undefined;
+    const elapsed =
+      (
+        now -
+        this.lastRefill
+      ) / 1000;
 
-  if (body.row !== undefined) {
     if (
-      typeof body.row !== "string" ||
-      !isValidIdentifier(body.row)
+      elapsed > 0
     ) {
-      return res.status(400).json({
-        error: "Invalid row",
-      });
+      this.tokens =
+        Math.min(
+          this.burst,
+          this.tokens +
+            elapsed *
+              this.ratePerSecond,
+        );
+
+      this.lastRefill =
+        now;
     }
 
-    row = body.row.trim();
+    if (
+      this.tokens <
+      1
+    ) {
+      return false;
+    }
+
+    this.tokens -=
+      1;
+
+    return true;
   }
+}
 
-  // ------------------------------------------------
-  // Validate action
-  // ------------------------------------------------
+/**
+ ----------------------------------------------------------
+ * HEALTH
+ ----------------------------------------------------------
+ */
 
-  const validActions: LightAction[] = [
-    "solid",
-    "flash",
-    "off",
-  ];
-
-  if (
-    typeof body.action !== "string" ||
-    !validActions.includes(
-      body.action as LightAction,
-    )
-  ) {
-    return res.status(400).json({
-      error: "Invalid action",
+app.get(
+  '/health',
+  (_req, res) => {
+    res.json({
+      status: 'ok',
     });
-  }
+  },
+);
 
-  const action = body.action as LightAction;
+/**
+ * ---------------------------------------------------------
+ * SERVER TIME
+ * ---------------------------------------------------------
+ */
 
-  // ------------------------------------------------
-  // Validate color
-  // ------------------------------------------------
-
-  const color =
-    typeof body.color === "string"
-      ? body.color.trim()
-      : "#000000";
-
-  if (!/^#[0-9a-fA-F]{6}$/.test(color)) {
-    return res.status(400).json({
-      error: "Invalid color",
+app.get(
+  '/time',
+  (_req, res) => {
+    res.json({
+      serverTime:
+        Date.now(),
     });
-  }
+  },
+);
 
-  // ------------------------------------------------
-  // Validate duration
-  // ------------------------------------------------
+/**
+ * ---------------------------------------------------------
+ * ADMIN STATS
+ * ---------------------------------------------------------
+ */
 
-  const duration =
-    typeof body.duration === "number"
-      ? body.duration
-      : 0;
+app.get(
+  '/admin/stats',
+  requireAdmin,
+  (_req, res) => {
+    res.json({
+      status: 'ok',
 
-  if (
-    !Number.isFinite(duration) ||
-    duration < 0 ||
-    duration > 10_000
-  ) {
-    return res.status(400).json({
-      error: "Invalid duration",
+      serverTime:
+        Date.now(),
+
+      rooms:
+        rooms.getStats(),
+
+      crowd:
+        crowd.getStats(),
     });
-  }
+  },
+);
 
-  // ------------------------------------------------
-  // Build target
-  // ------------------------------------------------
+/**
+ * ---------------------------------------------------------
+ * ADMIN CROWD STATS
+ * ---------------------------------------------------------
+ *
+ * This is useful for the admin dashboard because the
+ * dashboard does not need to know anything about audience
+ * WebSocket connections.
+ */
 
-  const target: CommandTarget = {
-    zone,
-    ...(row !== undefined
-      ? { row }
-      : {}),
-  };
+app.get(
+  '/admin/crowd',
+  requireAdmin,
+  (_req, res) => {
+    res.json({
+      status: 'ok',
 
-  // ------------------------------------------------
-  // Build command
-  // ------------------------------------------------
+      serverTime:
+        Date.now(),
 
-  sequence++;
+      crowd:
+        crowd.getStats(),
+    });
+  },
+);
 
-  const command: LightCommand = {
-    type: "command",
-    action,
-    color,
-    duration,
-    timestamp: Date.now(),
-    sequence,
-  };
+/**
+ * ---------------------------------------------------------
+ * RESET CROWD INTERACTION
+ * ---------------------------------------------------------
+ *
+ * Useful before a new audience interaction segment.
+ *
+ * Example:
+ *
+ * "Make some noise!"
+ * → reset
+ * → collect taps
+ * → calculate energy
+ * → trigger pattern
+ */
 
-  // ------------------------------------------------
-  // Broadcast
-  // ------------------------------------------------
+app.post(
+  '/admin/crowd/reset',
+  requireAdmin,
+  (_req, res) => {
+    crowd.reset();
 
-  const recipients = rooms.broadcast(
-    target,
-    command,
-  );
+    res.json({
+      success: true,
 
-  // ------------------------------------------------
-  // Response
-  // ------------------------------------------------
+      crowd:
+        crowd.getStats(),
+    });
+  },
+);
 
-  return res.json({
-    success: true,
-    recipients,
-    target,
-    command,
-  });
-});
+/**
+ * ---------------------------------------------------------
+ * ADMIN LIGHT COMMAND
+ * ---------------------------------------------------------
+ */
 
-// --------------------------------------------------
-// WebSocket upgrade handling
-// --------------------------------------------------
+app.post(
+  '/admin/command',
+  requireAdmin,
+  (req, res) => {
+    const body =
+      req.body as {
+        zone?: unknown;
+        row?: unknown;
+        action?: unknown;
+        color?: unknown;
+        duration?: unknown;
+      };
 
-server.on(
-  "upgrade",
-  (request, socket, head) => {
-    try {
-      const requestUrl = new URL(
-        request.url ?? "/",
-        `http://${request.headers.host ?? "localhost"}`,
+    /**
+     * Zone
+     */
+    const zone =
+      normalizeZone(
+        body.zone,
       );
 
-      // Only allow WebSocket connections on /ws.
-      if (requestUrl.pathname !== "/ws") {
-        socket.write(
-          "HTTP/1.1 404 Not Found\r\n" +
-            "Connection: close\r\n" +
-            "\r\n",
-        );
+    if (!zone) {
+      res
+        .status(400)
+        .json({
+          error:
+            'Invalid zone',
+        });
 
-        socket.destroy();
+      return;
+    }
 
-        return;
-      }
+    /**
+     * Row
+     */
+    const row =
+      normalizeRow(
+        body.row,
+      );
 
-      // ------------------------------------------------
-      // Validate Origin
-      // ------------------------------------------------
+    if (
+      body.row !==
+        undefined &&
+      body.row !==
+        null &&
+      body.row !==
+        '' &&
+      !row
+    ) {
+      res
+        .status(400)
+        .json({
+          error:
+            'Invalid row',
+        });
 
-      const origin = request.headers.origin;
+      return;
+    }
 
+    /**
+     * Action
+     */
+    if (
+      !isValidAction(
+        body.action,
+      )
+    ) {
+      res
+        .status(400)
+        .json({
+          error:
+            'Invalid action',
+        });
+
+      return;
+    }
+
+    /**
+     * Color
+     */
+    if (
+      !isValidColor(
+        body.color,
+      )
+    ) {
+      res
+        .status(400)
+        .json({
+          error:
+            'Color must be #RRGGBB',
+        });
+
+      return;
+    }
+
+    /**
+     * Duration
+     */
+    if (
+      !isValidDuration(
+        body.duration,
+      )
+    ) {
+      res
+        .status(400)
+        .json({
+          error:
+            'Duration must be between 0 and 10000ms',
+        });
+
+      return;
+    }
+
+    const target: CommandTarget =
+      {
+        zone,
+
+        ...(row
+          ? { row }
+          : {}),
+      };
+
+    const command:
+      LightCommand =
+      {
+        type: 'command',
+
+        action:
+          body.action,
+
+        color:
+          body.color.toUpperCase(),
+
+        duration:
+          body.duration,
+
+        timestamp:
+          Date.now(),
+
+        sequence:
+          ++commandSequence,
+      };
+
+    const recipients =
+      rooms.broadcast(
+        target,
+        command,
+      );
+
+    res.json({
+      success: true,
+
+      recipients,
+
+      target,
+
+      command,
+    });
+  },
+);
+
+/**
+ * ---------------------------------------------------------
+ * WEBSOCKET UPGRADE
+ * ---------------------------------------------------------
+ */
+
+server.on(
+  'upgrade',
+  (
+    request,
+    socket,
+    head,
+  ) => {
+    try {
+      const origin =
+        request.headers.origin;
+
+      /**
+       * Browser clients send Origin.
+       *
+       * CLI tools such as wscat generally do not.
+       */
       if (
         origin &&
-        !config.allowedOrigins.includes(origin)
+        !config.allowedOrigins.includes(
+          origin,
+        )
       ) {
         socket.write(
-          "HTTP/1.1 403 Forbidden\r\n" +
-            "Connection: close\r\n" +
-            "\r\n",
+          'HTTP/1.1 403 Forbidden\r\n\r\n',
         );
 
         socket.destroy();
@@ -372,26 +693,19 @@ server.on(
         return;
       }
 
-      // ------------------------------------------------
-      // Read zone / row from query parameters
-      // ------------------------------------------------
-
-      let zone: string;
-      let row: string | undefined;
-
-      try {
-        zone = normalizeZone(
-          requestUrl.searchParams.get("zone"),
+      const url =
+        new URL(
+          request.url ??
+            '/',
+          `http://${request.headers.host}`,
         );
 
-        row = normalizeRow(
-          requestUrl.searchParams.get("row"),
-        );
-      } catch {
+      if (
+        url.pathname !==
+        '/ws'
+      ) {
         socket.write(
-          "HTTP/1.1 400 Bad Request\r\n" +
-            "Connection: close\r\n" +
-            "\r\n",
+          'HTTP/1.1 404 Not Found\r\n\r\n',
         );
 
         socket.destroy();
@@ -399,18 +713,50 @@ server.on(
         return;
       }
 
-      // ------------------------------------------------
-      // Complete WebSocket upgrade
-      // ------------------------------------------------
+      /**
+       * Audience room.
+       *
+       * These parameters are ONLY used for outgoing
+       * spatial targeting.
+       *
+       * They are NOT used for incoming audience events.
+       */
+      const zone =
+        normalizeZone(
+          url.searchParams.get(
+            'zone',
+          ) ?? 'main',
+        );
+
+      if (
+        !zone ||
+        zone === 'all'
+      ) {
+        socket.write(
+          'HTTP/1.1 400 Bad Request\r\n\r\n',
+        );
+
+        socket.destroy();
+
+        return;
+      }
+
+      const row =
+        normalizeRow(
+          url.searchParams.get(
+            'row',
+          ),
+        );
 
       wss.handleUpgrade(
         request,
         socket,
         head,
-        (webSocket) => {
+        ws => {
           wss.emit(
-            "connection",
-            webSocket,
+            'connection',
+            ws,
+            request,
             {
               zone,
               row,
@@ -424,156 +770,357 @@ server.on(
   },
 );
 
-// --------------------------------------------------
-// WebSocket connection
-// --------------------------------------------------
+/**
+ * ---------------------------------------------------------
+ * WEBSOCKET CONNECTION
+ * ---------------------------------------------------------
+ */
 
 wss.on(
-  "connection",
+  'connection',
   (
-    socket,
-    metadata: {
+    socket: WebSocket,
+    _request: http.IncomingMessage,
+    context: {
       zone: string;
       row?: string;
     },
   ) => {
-    const client: Client = {
-      socket,
-      zone: metadata.zone,
-      row: metadata.row,
-      alive: true,
-    };
+    const client: Client =
+      {
+        socket,
 
-    // Add client to its dynamic zone.
-    rooms.join(client);
+        zone:
+          context.zone,
 
-    // Tell the client that it successfully joined.
+        row:
+          context.row,
+
+        alive: true,
+      };
+
+    /**
+     * Per-connection audience tap limiter.
+     */
+    const rateLimiter =
+      new AudienceRateLimiter(
+        config
+          .audienceRateLimit
+          .ratePerSecond,
+
+        config
+          .audienceRateLimit
+          .burst,
+      );
+
+    rooms.join(
+      client,
+    );
+
+    crowd.connectionOpened();
+
+    /**
+     * Initial connection acknowledgement.
+     */
     socket.send(
       JSON.stringify({
-        type: "joined",
-        zone: client.zone,
-        row: client.row,
-        serverTime: Date.now(),
+        type: 'joined',
+
+        zone:
+          client.zone,
+
+        ...(client.row
+          ? {
+              row:
+                client.row,
+            }
+          : {}),
+
+        serverTime:
+          Date.now(),
       }),
     );
 
-    // ------------------------------------------------
-    // WebSocket heartbeat
-    // ------------------------------------------------
+    /**
+     * -------------------------------------------------------
+     * MESSAGE HANDLER
+     * -------------------------------------------------------
+     */
 
-    socket.on("pong", () => {
-      client.alive = true;
-    });
+socket.on(
+  'message',
+  data => {
+    try {
+      /**
+       * ws RawData can be:
+       * - Buffer
+       * - ArrayBuffer
+       * - Buffer[]
+       *
+       * Normalize all forms into a Buffer.
+       */
+      const payload: Buffer =
+        Array.isArray(data)
+          ? Buffer.concat(data)
+          : Buffer.isBuffer(data)
+            ? data
+            : Buffer.from(
+                new Uint8Array(data),
+              );
 
-    // ------------------------------------------------
-    // Client messages
-    // ------------------------------------------------
-
-    socket.on("message", (raw) => {
-      try {
-        const message = JSON.parse(
-          raw.toString(),
-        );
-
-        /**
-         * Clients are only allowed to send ping.
-         *
-         * They cannot issue light commands.
-         */
-        if (
-          message.type === "ping" &&
-          Number.isFinite(message.timestamp)
-        ) {
-          socket.send(
-            JSON.stringify({
-              type: "pong",
-              timestamp: message.timestamp,
-              serverTime: Date.now(),
-            }),
-          );
-        }
-      } catch {
-        socket.close(
-          1003,
-          "Invalid message",
-        );
+      /**
+       * Protect the JSON parser from
+       * unexpectedly large payloads.
+       */
+      if (
+        payload.byteLength >
+        4096
+      ) {
+        return;
       }
-    });
 
-    // ------------------------------------------------
-    // Cleanup
-    // ------------------------------------------------
+      const message =
+        JSON.parse(
+          payload.toString('utf8'),
+        ) as unknown;
 
-    socket.on("close", () => {
-      rooms.leave(client);
-    });
+      if (
+        !message ||
+        typeof message !==
+          'object'
+      ) {
+        return;
+      }
 
-    socket.on("error", () => {
-      rooms.leave(client);
-    });
+      const event =
+        message as Partial<AudienceEvent>;
+
+      /**
+       * PING
+       */
+      if (
+        event.type ===
+        'ping'
+      ) {
+        if (
+          typeof event.timestamp !==
+          'number'
+        ) {
+          return;
+        }
+
+        socket.send(
+          JSON.stringify({
+            type: 'pong',
+            timestamp:
+              event.timestamp,
+            serverTime:
+              Date.now(),
+          }),
+        );
+
+        return;
+      }
+
+      /**
+       * AUDIENCE TAP
+       */
+      if (
+        event.type ===
+        'tap'
+      ) {
+        if (
+          !rateLimiter.consume()
+        ) {
+          return;
+        }
+
+        crowd.recordTap();
+
+        return;
+      }
+    } catch {
+      /**
+       * Invalid client messages are
+       * intentionally ignored.
+       */
+    }
   },
 );
 
-// --------------------------------------------------
-// Heartbeat
-// --------------------------------------------------
-
-const heartbeat = setInterval(() => {
-  for (const client of rooms.getClients()) {
     /**
-     * Client didn't answer the previous heartbeat.
+     * -------------------------------------------------------
+     * HEARTBEAT
+     * -------------------------------------------------------
      */
-    if (!client.alive) {
-      client.socket.terminate();
-      rooms.leave(client);
 
-      continue;
-    }
+    socket.on(
+      'pong',
+      () => {
+        client.alive =
+          true;
+      },
+    );
 
     /**
-     * Mark dead until the client responds with pong.
+     * -------------------------------------------------------
+     * CLOSE
+     * -------------------------------------------------------
      */
-    client.alive = false;
 
-    client.socket.ping();
-  }
-}, 30_000);
+    socket.on(
+      'close',
+      () => {
+        rooms.leave(
+          client,
+        );
 
-// --------------------------------------------------
-// Start server
-// --------------------------------------------------
+        crowd.connectionClosed();
+      },
+    );
 
-server.listen(
-  config.port,
-  "0.0.0.0",
-  () => {
-    console.log(
-      `Realtime server on :${config.port}`,
+    socket.on(
+      'error',
+      () => {
+        /**
+         * close event performs cleanup.
+         */
+      },
     );
   },
 );
 
-// --------------------------------------------------
-// Graceful shutdown
-// --------------------------------------------------
+/**
+ * ---------------------------------------------------------
+ * HEARTBEAT LOOP
+ * ---------------------------------------------------------
+ */
 
-function shutdown() {
-  console.log(
-    "Shutting down realtime server...",
+const heartbeat =
+  setInterval(
+    () => {
+      for (
+        const client of rooms.getClients()
+      ) {
+        if (
+          client.alive ===
+          false
+        ) {
+          rooms.leave(
+            client,
+          );
+
+          crowd.connectionClosed();
+
+          try {
+            client.socket.terminate();
+          } catch {
+            // Ignore.
+          }
+
+          continue;
+        }
+
+        client.alive =
+          false;
+
+        try {
+          client.socket.ping();
+        } catch {
+          rooms.leave(
+            client,
+          );
+
+          crowd.connectionClosed();
+
+          try {
+            client.socket.terminate();
+          } catch {
+            // Ignore.
+          }
+        }
+      }
+    },
+    30_000,
   );
 
-  clearInterval(heartbeat);
+/**
+ * ---------------------------------------------------------
+ * GRACEFUL SHUTDOWN
+ * ---------------------------------------------------------
+ */
 
-  wss.close();
+function shutdown(
+  signal: string,
+): void {
+  console.log(
+    `[server] ${signal} received`,
+  );
 
-  for (const client of rooms.getClients()) {
-    client.socket.terminate();
+  clearInterval(
+    heartbeat,
+  );
+
+  for (
+    const client of rooms.getClients()
+  ) {
+    try {
+      client.socket.close(
+        1001,
+        'Server shutting down',
+      );
+    } catch {
+      // Ignore.
+    }
   }
 
-  server.close(() => {
-    process.exit(0);
-  });
+  server.close(
+    () => {
+      process.exit(
+        0,
+      );
+    },
+  );
 }
 
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
+process.on(
+  'SIGTERM',
+  () =>
+    shutdown(
+      'SIGTERM',
+    ),
+);
+
+process.on(
+  'SIGINT',
+  () =>
+    shutdown(
+      'SIGINT',
+    ),
+);
+
+/**
+ * ---------------------------------------------------------
+ * START
+ * ---------------------------------------------------------
+ */
+
+server.listen(
+  config.port,
+  '0.0.0.0',
+  () => {
+    console.log(
+      `[server] listening on :${config.port}`,
+    );
+
+    console.log(
+      `[server] allowed origins: ${config.allowedOrigins.join(
+        ', ',
+      )}`,
+    );
+
+    console.log(
+      `[server] audience tap rate: ${config.audienceRateLimit.ratePerSecond}/sec`,
+    );
+  },
+);

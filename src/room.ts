@@ -1,191 +1,251 @@
-import WebSocket from 'ws';
-import type { LightCommand } from './types.js';
+import {
+  WebSocket,
+} from 'ws';
+
+import type {
+  CommandTarget,
+  LightCommand,
+} from './types.js';
 
 export interface Client {
   socket: WebSocket;
+
   zone: string;
+
   row?: string;
+
   alive: boolean;
 }
 
-export interface BroadcastTarget {
-  zone: string | 'all';
-  row?: string;
-}
+class RoomManager {
+  private rooms =
+    new Map<
+      string,
+      Set<Client>
+    >();
 
-export class RoomManager {
-  /**
-   * Zone -> clients
-   *
-   * Example:
-   *
-   * A -> [phone1, phone2, phone3]
-   * B -> [phone4, phone5]
-   */
-  private rooms = new Map<string, Set<Client>>();
+  private clients =
+    new Set<Client>();
 
-  /**
-   * All connected clients.
-   */
-  private clients = new Set<Client>();
+  join(
+    client: Client,
+  ): void {
+    this.clients.add(
+      client,
+    );
 
-  /**
-   * Add a client to the appropriate zone.
-   */
-  join(client: Client) {
-    let room = this.rooms.get(client.zone);
+    let room =
+      this.rooms.get(
+        client.zone,
+      );
 
     if (!room) {
-      room = new Set<Client>();
-      this.rooms.set(client.zone, room);
+      room =
+        new Set<Client>();
+
+      this.rooms.set(
+        client.zone,
+        room,
+      );
     }
 
     room.add(client);
-    this.clients.add(client);
   }
 
-  /**
-   * Remove a client from its zone and global client set.
-   */
-  leave(client: Client) {
-    this.clients.delete(client);
+  leave(
+    client: Client,
+  ): void {
+    this.clients.delete(
+      client,
+    );
 
-    const room = this.rooms.get(client.zone);
+    const room =
+      this.rooms.get(
+        client.zone,
+      );
 
     if (!room) {
       return;
     }
 
-    room.delete(client);
+    room.delete(
+      client,
+    );
 
-    // Remove empty zones.
-    if (room.size === 0) {
-      this.rooms.delete(client.zone);
+    if (
+      room.size === 0
+    ) {
+      this.rooms.delete(
+        client.zone,
+      );
     }
   }
 
-  /**
-   * Broadcast a command.
-   *
-   * Supported targets:
-   *
-   * { zone: 'all' }
-   * { zone: 'A' }
-   * { zone: 'A', row: '12' }
-   */
   broadcast(
-    target: BroadcastTarget,
-    command: LightCommand
+    target: CommandTarget,
+    command: LightCommand,
   ): number {
-    const payload = JSON.stringify(command);
+    const serialized =
+      JSON.stringify(
+        command,
+      );
 
-    let recipients: Iterable<Client>;
+    let recipients = 0;
 
-    // Global broadcast.
-    if (target.zone === 'all') {
-      recipients = this.clients;
-    } else {
-      // Zone broadcast.
-      const room = this.rooms.get(target.zone);
-
-      if (!room) {
-        return 0;
+    /**
+     * ALL means every connected audience phone.
+     */
+    if (
+      target.zone === 'all'
+    ) {
+      for (
+        const client of this.clients
+      ) {
+        if (
+          this.send(
+            client,
+            serialized,
+          )
+        ) {
+          recipients += 1;
+        }
       }
 
-      recipients = room;
+      return recipients;
     }
 
-    let delivered = 0;
+    /**
+     * Otherwise target a specific zone.
+     */
+    const room =
+      this.rooms.get(
+        target.zone,
+      );
 
-    for (const client of recipients) {
-      // Row targeting.
-      //
-      // If a row was specified, only deliver to clients
-      // belonging to that row.
+    if (!room) {
+      return 0;
+    }
+
+    for (
+      const client of room
+    ) {
+      /**
+       * Optional row targeting.
+       */
       if (
-        target.row !== undefined &&
-        client.row !== target.row
+        target.row &&
+        client.row !==
+          target.row
       ) {
         continue;
       }
 
-      // Don't send to closed/non-open sockets.
-      if (client.socket.readyState !== WebSocket.OPEN) {
-        continue;
+      if (
+        this.send(
+          client,
+          serialized,
+        )
+      ) {
+        recipients += 1;
       }
-
-      // Protect the server from endlessly buffering data
-      // for a slow client.
-      if (client.socket.bufferedAmount > 64 * 1024) {
-        continue;
-      }
-
-      client.socket.send(payload);
-
-      delivered++;
     }
 
-    return delivered;
+    return recipients;
   }
 
-  /**
-   * Return dynamic audience information.
-   *
-   * Example:
-   *
-   * {
-   *   total: 6,
-   *   zones: {
-   *     A: {
-   *       total: 3,
-   *       rows: {
-   *         '1': 1,
-   *         '2': 2
-   *       }
-   *     },
-   *     B: {
-   *       total: 2,
-   *       rows: {
-   *         '1': 2
-   *       }
-   *     }
-   *   }
-   * }
-   */
+  private send(
+    client: Client,
+    serialized: string,
+  ): boolean {
+    if (
+      client.socket.readyState !==
+      WebSocket.OPEN
+    ) {
+      return false;
+    }
+
+    /**
+     * Basic backpressure protection.
+     *
+     * We do not want one slow mobile connection
+     * to accumulate an unbounded send buffer.
+     */
+    if (
+      client.socket.bufferedAmount >
+      64 * 1024
+    ) {
+      return false;
+    }
+
+    try {
+      client.socket.send(
+        serialized,
+      );
+
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   getStats() {
     const zones: Record<
       string,
       {
         total: number;
-        rows: Record<string, number>;
+        rows: Record<
+          string,
+          number
+        >;
       }
     > = {};
 
-    for (const [zone, members] of this.rooms) {
-      const rows: Record<string, number> = {};
+    for (
+      const [
+        zone,
+        clients,
+      ] of this.rooms
+    ) {
+      const rows: Record<
+        string,
+        number
+      > = {};
 
-      for (const client of members) {
-        const row = client.row ?? 'unassigned';
-
-        rows[row] = (rows[row] ?? 0) + 1;
+      for (
+        const client of clients
+      ) {
+        if (
+          client.row
+        ) {
+          rows[
+            client.row
+          ] =
+            (
+              rows[
+                client.row
+              ] ?? 0
+            ) + 1;
+        }
       }
 
       zones[zone] = {
-        total: members.size,
+        total:
+          clients.size,
         rows,
       };
     }
 
     return {
-      total: this.clients.size,
+      totalClients:
+        this.clients.size,
       zones,
     };
   }
 
-  /**
-   * Useful for heartbeat/shutdown logic.
-   */
-  getClients() {
+  getClients(): Set<Client> {
     return this.clients;
   }
 }
+
+export const rooms =
+  new RoomManager();
